@@ -1,0 +1,965 @@
+---
+title: "scRNA seq Analysis"
+output: html_document
+date: "2025-05-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Loading the data: 
+```{r}
+library(Seurat)
+library(ggplot2)
+library(tidyverse)
+```
+```{r}
+#making a vector of samples
+sample_names <- c(
+    "case1_YF", "case1_ZY",
+    "case2_YF", "case2_ZY", "case2_ZC",
+    "case3_YF", "case3_ZY",
+    "case4_ZY"
+)
+```
+Reading the dataand creating seurat object
+```{r}
+# Initializing a list to hold the Seurat objects
+seurat_objects <- list()
+
+# Looping through each sample
+for (sample in sample_names) {
+    # Converting sample name to lowercase folder name 
+    folder_name <- sample
+    
+    # Read the data
+    data <- Read10X(data.dir = folder_name)
+    
+    # Create Seurat object
+    seurat_obj <- CreateSeuratObject(
+        counts = data,
+        project = sample,
+        min.cells = 3,
+        min.features = 200
+    )
+    
+    # Store in the list
+    seurat_objects[[sample]] <- seurat_obj
+}
+
+```
+ Adding Mitochondrial Percentage (% mt) to All Samples
+```{r}
+for (sample in names(seurat_objects)) {
+    seurat_objects[[sample]][["percent.mt"]] <- PercentageFeatureSet(seurat_objects[[sample]], pattern = "^MT-")
+}
+```
+Visualizing QC metrics: Violin Plots
+```{r}
+for (sample in names(seurat_objects)) {
+    print(
+        VlnPlot(
+            seurat_objects[[sample]],
+            features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+            ncol = 3,
+            pt.size = 0.1
+        ) + ggtitle(paste("QC Metrics for", sample))
+    )
+}
+
+```
+
+Scatter Plots:
+```{r}
+for (sample in names(seurat_objects)) {
+    plot1 <- FeatureScatter(
+        seurat_objects[[sample]], feature1 = "nCount_RNA", feature2 = "percent.mt"
+    ) + ggtitle(paste("Counts vs Mito %:", sample))
+    
+    plot2 <- FeatureScatter(
+        seurat_objects[[sample]], feature1 = "nCount_RNA", feature2 = "nFeature_RNA"
+    ) + ggtitle(paste("Counts vs Features:", sample))
+    
+    print(plot1 + plot2)
+}
+
+```
+Integrated Plot
+```{r}
+# Combine QC metrics from all samples
+qc_data_all <- data.frame()
+
+for (sample in names(seurat_objects)) {
+    meta <- seurat_objects[[sample]]@meta.data
+    meta$Sample <- sample
+    qc_data_all <- rbind(qc_data_all, meta)
+}
+
+# Plot: nFeature_RNA vs nCount_RNA colored by percent.mt, faceted by Sample
+ggplot(qc_data_all, aes(x = nCount_RNA, y = nFeature_RNA, color = percent.mt)) +
+    geom_point(size = 0.5) +
+    scale_color_viridis_c() +
+    facet_wrap(~ Sample) +
+    theme_bw() +
+    labs(title = "Integrated QC Plot: All Samples",
+         x = "Total Molecules (nCount_RNA)",
+         y = "Unique Genes (nFeature_RNA)",
+         color = "% Mitochondrial")
+
+```
+
+Filtering across all samples:
+```{r}
+# Define filtering thresholds
+min_features <- 200
+max_features <- 6000
+min_counts <- 500
+max_counts <- 50000
+max_mito <- 25
+
+# Apply filtering to all samples
+for (sample in names(seurat_objects)) {
+    seurat_objects[[sample]] <- subset(
+        seurat_objects[[sample]],
+        subset = nFeature_RNA > min_features &
+                 nFeature_RNA < max_features &
+                 nCount_RNA > min_counts &
+                 nCount_RNA < max_counts &
+                 percent.mt < max_mito
+    )
+}
+
+```
+Filtering Strategy:
+For this analysis, I applied the following filtering thresholds to ensure retention of high-quality single-cell data while removing likely low-quality cells and doublets:
+-nFeature_RNA (number of detected genes per cell): 200–6000
+-nCount_RNA (total UMI counts per cell): 500–50,000
+-percent.mt (mitochondrial gene percentage): < 25%
+
+These thresholds were determined based on visual inspection of violin plots and scatter plots. The lower bound of 200 genes was chosen to exclude droplets likely representing empty captures or low-complexity cells, visible as a distinct left-hand "tail" in the nFeature_RNA distribution. The upper bound of 6000 genes and 50,000 UMIs was selected to remove outliers that likely represent doublets or multiplets, which appeared as a sparse set of cells with markedly higher RNA content than the majority of cells. For mitochondrial percentage, the 25% cutoff was informed by the sharp increase in percent.mt seen in low-quality or apoptotic cells, as reflected in the QC plots where a notable spread of cells with >25% mitochondrial reads was observed.
+
+QC table;
+```{r}
+# Initialize a QC summary table
+qc_summary <- data.frame(
+    Sample = character(),
+    Cells_Before = integer(),
+    Genes_Before = integer(),
+    Cells_After = integer(),
+    Genes_After = integer(),
+    stringsAsFactors = FALSE
+)
+
+# Loop to fill the table
+for (sample in sample_names) {
+    # Load raw data again to get BEFORE counts
+    raw_data <- Read10X(data.dir = sample)
+    raw_seurat <- CreateSeuratObject(
+        counts = raw_data,
+        project = sample,
+        min.cells = 3,
+        min.features = 200
+    )
+    
+    # Cells/genes BEFORE filtering
+    raw_cells <- ncol(raw_seurat)
+    raw_genes <- nrow(raw_seurat)
+    
+    # Cells/genes AFTER filtering
+    filtered_cells <- ncol(seurat_objects[[sample]])
+    filtered_genes <- nrow(seurat_objects[[sample]])
+    
+    qc_summary <- rbind(qc_summary, data.frame(
+        Sample = sample,
+        Cells_Before = raw_cells,
+        Genes_Before = raw_genes,
+        Cells_After = filtered_cells,
+        Genes_After = filtered_genes
+    ))
+}
+
+# View QC summary table
+print(qc_summary)
+
+```
+Visualize QC (AFTER filtering)
+```{r}
+for (sample in names(seurat_objects)) {
+    print(
+        VlnPlot(
+            seurat_objects[[sample]],
+            features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+            ncol = 3,
+            pt.size = 0.1
+        ) + ggtitle(paste("QC AFTER Filtering:", sample))
+    )
+}
+
+```
+Alternative strategies for setting thresholds without visual inspection include:
+
+Median Absolute Deviation (MAD): Automatically defines outliers as cells beyond a set number of MADs from the median (e.g., >3× MAD) for metrics like gene counts or mitochondrial percentage (Lun et al., 2016).
+
+EmptyDrops:A statistical test to distinguish true cells from empty droplets based on expression profiles, reducing reliance on arbitrary cutoffs (Lun et al., 2019).
+
+scater’s quickPerCellQC:Provides automated QC using data-driven thresholds based on per-cell metrics, integrating outlier detection and batch correction (McCarthy et al., 2017).
+
+CellBender:Uses a deep generative model to remove ambient RNA and identify true cells without manual thresholding (Fleming et al., 2022).
+
+
+Doublet Detection
+```{r}
+library(scDblFinder)
+library(SeuratDisk)
+
+# Store doublet results
+doublet_results <- list()
+
+for (sample in names(seurat_objects)) {
+    cat("Processing:", sample, "\n")
+    
+    # Convert Seurat -> SingleCellExperiment
+    sce <- as.SingleCellExperiment(seurat_objects[[sample]])
+    
+    # Run scDblFinder
+    sce <- scDblFinder(sce)
+    
+    # Add doublet classification back to Seurat metadata
+    seurat_objects[[sample]]$scDblFinder.class <- sce$scDblFinder.class
+    seurat_objects[[sample]]$scDblFinder.score <- sce$scDblFinder.score
+    
+    # Save doublet info
+    doublet_results[[sample]] <- table(sce$scDblFinder.class)
+}
+```
+
+Removing doublets: 
+
+```{r}
+for (sample in names(seurat_objects)) {
+    seurat_objects[[sample]] <- subset(
+        seurat_objects[[sample]],
+        subset = scDblFinder.class == "singlet"
+    )
+}
+
+```
+Doublet Results:
+```{r}
+# Create a summary table
+dbl_table <- data.frame(
+    Sample = names(doublet_results),
+    Singlets = sapply(doublet_results, function(x) x["singlet"]),
+    Doublets = sapply(doublet_results, function(x) x["doublet"])
+)
+
+print(dbl_table)
+
+```
+Merging Samples:
+```{r}
+# Merge all samples into one combined Seurat object
+combined_obj <- merge(
+    seurat_objects[[1]],
+    y = seurat_objects[-1],
+    add.cell.ids = names(seurat_objects),
+    project = "MergedSamples"
+)
+```
+
+Count Normalization
+```{r}
+combined_obj <- NormalizeData(
+    combined_obj,
+    normalization.method = "LogNormalize",
+    scale.factor = 10000
+)
+```
+I applied the LogNormalize method implemented in Seurat, following the same approach described in the paper. This method normalizes the gene expression measurements for each cell by the total expression (library size), multiplies the result by a scale factor (10,000), and then log-transforms the data (natural log).
+This normalization reduces technical variability caused by differing sequencing depths and brings all cells to a comparable scale, which is critical before identifying highly variable genes and performing downstream analysis.
+
+Feature Selection (Highly Variable Genes)
+```{r}
+# Find 2000 HVGs in the combined dataset
+combined_obj <- FindVariableFeatures(
+    combined_obj,
+    selection.method = "vst",
+    nfeatures = 2000
+)
+
+# Plot top HVGs
+top10 <- head(VariableFeatures(combined_obj), 10)
+hvg_plot <- VariableFeaturePlot(combined_obj)
+hvg_plot <- LabelPoints(hvg_plot, points = top10, repel = TRUE)
+print(hvg_plot + ggtitle("Highly Variable Features (Combined Dataset)"))
+```
+For feature selection, I applied the variance-stabilizing transformation (VST) method implemented in Seurat’s FindVariableFeatures() function, using the combined dataset after merging all samples. This method models the mean–variance relationship of each gene and ranks genes based on their standardized variance across all cells. I selected the top 2000 highly variable genes (HVGs), which is a widely used standard that balances sensitivity for detecting meaningful biological signals while minimizing noise from lowly expressed or non-informative genes.
+
+The plot of highly variable features visualizes the standardized variance (y-axis) against the average expression (x-axis) for all detected genes. In total, 2000 genes (shown in red) were identified as highly variable, while ~19,640 genes (shown in black) were considered non-variable and excluded from downstream dimensionality reduction. Key HVGs included genes such as SPP1, JCHAIN, IGKC, IGLC2, APOC1, and CXCL14, reflecting biologically diverse populations like immune, stromal, and epithelial cell types, consistent with expectations for tumor microenvironment heterogeneity. These 2000 HVGs were used for PCA and further clustering to ensure the most informative genes drove downstream analysis.
+
+Scaling the data:
+```{r}
+# Scale the data (standardize each gene: mean = 0, variance = 1)
+combined_obj <- ScaleData(combined_obj)
+```
+PCA
+```{r}
+# Run PCA on the combined dataset using the 2000 HVGs
+combined_obj <- RunPCA(
+    combined_obj,
+    features = VariableFeatures(combined_obj),
+    verbose = FALSE
+)
+
+# Plot the Elbow plot to help decide how many PCs to keep
+ElbowPlot(combined_obj, ndims = 50) +
+    ggtitle("Elbow Plot: Combined Dataset")
+
+
+```
+
+I performed PCA on the combined dataset using the 2000 highly variable genes to reduce dimensionality while retaining the core biological signals.From the plot, there’s a noticeable inflection point around PC 15–20, after which additional PCs contribute only marginally to the explained variance. To balance capturing sufficient biological variation with minimizing noise, I selected 20 PCs for downstream clustering and visualization. This choice ensures robust representation of both abundant and rare cell populations while avoiding unnecessary dimensionality that could dilute true biological signals.
+
+Clustering (Graph-Based, 20 PCs):
+```{r}
+# Find neighbors and clusters using 20 PCs
+combined_obj <- FindNeighbors(combined_obj, dims = 1:20)
+combined_obj <- FindClusters(combined_obj, resolution = 0.5)  
+
+```
+UMAP Visualisation:
+```{r}
+# Run UMAP (2D embedding) using 20 PCs
+combined_obj <- RunUMAP(combined_obj, dims = 1:20)
+
+# Plot: Clusters (labeled)
+DimPlot(combined_obj, reduction = "umap", group.by = "seurat_clusters", label = TRUE) +
+    ggtitle("UMAP: Clusters")
+
+# Plot: Sample origins (no labels)
+DimPlot(combined_obj, reduction = "umap", group.by = "orig.ident", label = FALSE) +
+    ggtitle("UMAP: Sample Origins")
+
+```
+```{r}
+# Cells per sample
+cell_counts <- table(combined_obj$orig.ident)
+print(cell_counts)
+
+# Number of clusters
+num_clusters <- length(unique(Idents(combined_obj)))
+print(paste("Number of clusters:", num_clusters))
+
+```
+For clustering, I applied Seurat’s graph-based clustering approach using the Louvain algorithm and visualized the results using UMAP for 2D embedding. I selected a resolution of 0.5, which provided a goood view of the data while avoiding over-splitting. The UMAP plot labeled by clusters revealed 26 distinct clusters, reflecting the cellular heterogeneity within the dataset.
+
+In total, the dataset contained 58,088 cells, with contributions from each sample as follows: case1_YF (8,594 cells), case1_ZY (7,781), case2_YF (9,970), case2_ZC (6,106), case2_ZY (8,112), case3_YF (6,922), case3_ZY (6,247), and case4_ZY (1,356 cells). The second UMAP plot, colored by sample origin, showed that many clusters were well-mixed across samples, especially between case2 and case3 (YF and ZY), which share a similar disease state. However, case1_YF and case1_ZY appeared to form more distinct clusters, suggesting potential batch effects or technical variation despite their shared biological condition. This pattern indicates that integration might be necessary, particularly to address the separation seen in case1, ensuring that downstream analyses capture true biological signals rather than technical artifacts.
+
+CCA-Based Integration (Batch Correction)
+```{r}
+# Apply normalization and HVG selection to each individual sample 
+for (sample in names(seurat_objects)) {
+    seurat_objects[[sample]] <- NormalizeData(
+        seurat_objects[[sample]],
+        normalization.method = "LogNormalize",
+        scale.factor = 10000
+    )
+    
+    seurat_objects[[sample]] <- FindVariableFeatures(
+        seurat_objects[[sample]],
+        selection.method = "vst",
+        nfeatures = 2000
+    )
+}
+# Find integration anchors using classic CCA-based method
+anchors <- FindIntegrationAnchors(object.list = seurat_objects, dims = 1:20)
+# Perform integration
+integrated_obj <- IntegrateData(anchorset = anchors)
+
+
+```
+```{r}
+# Scale the integrated data
+integrated_obj <- ScaleData(integrated_obj)
+
+# Run PCA
+integrated_obj <- RunPCA(integrated_obj)
+
+# Run UMAP (with 20 PCs)
+integrated_obj <- RunUMAP(integrated_obj, dims = 1:20)
+
+# Find neighbors and clusters (resolution can be adjusted)
+integrated_obj <- FindNeighbors(integrated_obj, dims = 1:20)
+integrated_obj <- FindClusters(integrated_obj, resolution = 0.5)
+
+```
+
+Visualisation after Integration (correct for batch effects)
+```{r}
+DimPlot(integrated_obj, reduction = "umap", group.by = "orig.ident") +
+    ggtitle("UMAP After Integration (by Sample)")
+
+```
+Before integration, the UMAP plot showed clear separation between samples, especially noticeable between case1_YF and case1_ZY as well as between other cases. Although some of this separation may reflect true biological variability, the distinct clustering of cells by sample origin strongly suggested the presence of technical batch effects. This was concerning because cells with similar biological characteristics but from different samples were not overlapping as expected which could bias downstream analyses.To correct for these batch effects, I applied Seurat’s Canonical Correlation Analysis (CCA)-based integration method. 
+
+The after-integration UMAP visualization showed substantially improved overlap between samples across clusters, confirming successful batch correction. The previously distinct separation between case1_YF and case1_ZY was resolved, and overall the dataset appeared well-mixed. This integrated object is now better suited for downstream analysis (e.g., marker gene discovery and differential expression), ensuring that clusters are driven by biology rather than technical artifacts.
+
+Marker Gene Analysis:
+```{r}
+# Find all marker genes (differential expression per cluster)
+all_markers <- FindAllMarkers(
+    integrated_obj,
+    only.pos = TRUE,        # Only return positive markers (overexpressed)
+    min.pct = 0.25,         # At least 25% of cells express the gene
+    logfc.threshold = 0.25  # Log-fold change threshold
+)
+
+# Get top 5 marker genes per cluster
+top5_markers <- all_markers %>%
+    group_by(cluster) %>%
+    top_n(5, avg_log2FC)
+
+# Show the table
+print(top5_markers)
+```
+
+In this analysis, I used Seurat’s FindAllMarkers() function, which performs Wilcoxon rank-sum tests by default to identify genes differentially expressed in each cluster compared to all other cells. This method is non-parametric, making no assumptions about normality, which is advantageous for sparse scRNA-seq data. Advantages include its robustness to outliers and suitability for the typical zero-inflated distributions seen in single-cell data.
+
+However, the Wilcoxon test also has limitations: it can be computationally intensive for large datasets and may not account for confounding factors like batch effects or technical covariates unless handled explicitly. Alternative methods like MAST or DESeq2 can model such effects but may require additional assumptions.
+
+Automatic Annotation of Cell Labels
+
+```{r}
+library(SingleR)
+library(celldex)
+library(Seurat)
+ref <- celldex::HumanPrimaryCellAtlasData()
+gene_union <- unique(unlist(lapply(sample_names, function(sample) {
+    rownames(GetAssayData(integrated_obj[["RNA"]], layer = paste0("data.", sample)))
+})))
+```
+
+```{r}
+library(Matrix)
+
+mat_list <- list()
+
+for (sample in sample_names) {
+    cat("Extracting & aligning:", sample, "\n")
+    
+    # Extract expression matrix for sample
+    mat <- GetAssayData(integrated_obj[["RNA"]], layer = paste0("data.", sample))
+    
+    # Identify genes present in this sample
+    genes_present <- rownames(mat)
+    
+    # Create a full matrix with all genes (match order)
+    missing_genes <- setdiff(gene_union, genes_present)
+    
+    # If any genes are missing, create a sparse matrix of 0s for them
+    if (length(missing_genes) > 0) {
+        zero_mat <- Matrix(0,
+                           nrow = length(missing_genes),
+                           ncol = ncol(mat),
+                           dimnames = list(missing_genes, colnames(mat)))
+        # Combine the original and zero matrices
+        mat <- rbind(mat, zero_mat)
+    }
+    
+    # Reorder rows to match the gene_union order
+    mat <- mat[gene_union, , drop = FALSE]
+    
+    mat_list[[sample]] <- mat
+}
+
+# Combine all matrices into one
+expr_matrix <- do.call(cbind, mat_list)
+
+# Confirm dimensions
+dim(expr_matrix)
+```
+```{r}
+library(SingleCellExperiment)
+sce_obj <- SingleCellExperiment(assays = list(logcounts = expr_matrix))
+
+ref <- celldex::HumanPrimaryCellAtlasData()
+
+singleR_results <- SingleR(
+    test = sce_obj,
+    ref = ref,
+    labels = ref$label.main
+)
+
+# Create a deep copy of the integrated object
+integrated_obj_copy <- integrated_obj
+# Add SingleR labels (per cell) to the copy
+integrated_obj_copy$SingleR_labels <- singleR_results$labels
+
+```
+```{r}
+DimPlot(integrated_obj, reduction = "umap", label = TRUE) +
+    ggtitle("UMAP: Clusters Annotated by SingleR")
+```
+
+```{r}
+# Build a table mapping clusters to most frequent SingleR label
+cluster_labels <- table(integrated_obj_copy$seurat_clusters, integrated_obj_copy$SingleR_labels)
+
+# Get the dominant label per cluster
+majority_labels <- apply(cluster_labels, 1, function(x) names(which.max(x)))
+
+# Create new vector where each cell is assigned its cluster’s dominant label
+cluster_annotation <- majority_labels[as.character(integrated_obj_copy$seurat_clusters)]
+names(cluster_annotation) <- colnames(integrated_obj_copy)
+
+# Add to Seurat metadata
+integrated_obj_copy <- AddMetaData(integrated_obj_copy, metadata = cluster_annotation, col.name = "Cluster_Label")
+
+DimPlot(integrated_obj_copy, group.by = "Cluster_Label", label = TRUE, repel = TRUE) +
+    ggtitle("UMAP Annotated by Majority Cell Type per Cluster")
+```
+Visualisation:
+```{r}
+library(patchwork)
+# Plot 1: majority cell type per cluster
+plot_annot <- DimPlot(integrated_obj_copy, group.by = "Cluster_Label", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP per Cluster")
+
+# Plot 2: Seurat cluster IDs
+plot_cluster <- DimPlot(integrated_obj_copy, group.by = "seurat_clusters", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP by Cluster Number")
+
+# Combine side-by-side
+plot_annot + plot_cluster
+```
+I used the SingleR algorithm (Aran et al., 2019) with the Human Primary Cell Atlas (HPCA) reference dataset to assign preliminary cell type identities to the clusters in our integrated single-cell RNA-seq dataset. SingleR works by comparing each cell’s gene expression profile to reference profiles of purified cell types and assigning the label of the closest match based on correlation. After obtaining per-cell annotations from SingleR, I summarized the predictions at the cluster level by taking the majority label for each cluster. This approach allowed us to assign a dominant cell identity to every cluster in an interpretable way while preserving the unsupervised clustering structure.
+
+The UMAP visualization annotated by these majority-vote labels showed distinct biological cell types aligning with the clustering, including epithelial cells, macrophages, neutrophils, monocytes, NK cells, T cells, B cells, dendritic cells, and chondrocytes. These identities are consistent with known components of the tumor microenvironment, capturing both tumor and immune compartments. Some clusters exhibited mixed annotations at the per-cell level, suggesting possible heterogeneity or transitional states within those populations. Overall, SingleR provided an efficient and reproducible initial annotation of the dataset, which will be refined in later steps by integrating marker gene expression and literature evidence.
+
+Citation: Aran, D., Looney, A. P., Liu, L., Wu, E., Fong, V., Hsu, A., Chak, S., Naikawadi, R. P., Wolters, P. J., Abate, A. R., Butte, A. J., & Bhattacharya, M. (2019). Reference-based analysis of lung single-cell sequencing reveals a transitional profibrotic macrophage. In Nature Immunology (Vol. 20, Issue 2, pp. 163–172). Springer Science and Business Media LLC. https://doi.org/10.1038/s41590-018-0276-y
+
+Manual Annotation
+
+Single plot showing top marker genes per cluster (violin plot)
+```{r violin_plot_allclusters, fig.width=14, fig.height=20}
+# Get top 3 markers per cluster
+top3_markers <- all_markers %>%
+  group_by(cluster) %>%
+  top_n(3, avg_log2FC)
+top_genes_all <- unique(top3_markers$gene)
+
+violin_plot <- VlnPlot(integrated_obj_copy, features = top_genes_all, group.by = "seurat_clusters",
+          pt.size = 0.1, stack = TRUE, flip = TRUE) +
+    ggtitle("Violin Plot: Top 3 Marker Genes per Cluster")
+# Show plot
+print(violin_plot)
+
+# Save as PNG
+ggsave("ViolinPlot_Top3Markers_AllClusters.png", violin_plot, width = 14, height = 20, dpi = 300)
+```
+
+Individual plots for top 3 clusters
+```{r}
+cluster_sizes <- table(Idents(integrated_obj_copy))
+
+# Sort clusters in descending order
+sorted_clusters <- sort(cluster_sizes, decreasing = TRUE)
+
+# Get names of the top 3 clusters
+top3_clusters <- names(sorted_clusters)[1:3]
+
+# Print the top 3 clusters and their sizes
+print(sorted_clusters[1:3])
+```
+
+```{r}
+# Subset top 5 markers for top 3 clusters
+top5_markers_top3 <- top5_markers %>%
+  filter(cluster %in% top3_clusters)
+
+for (clust in top3_clusters) {
+  genes <- top5_markers_top3 %>% filter(cluster == clust) %>% pull(gene)
+  
+  # Create stacked violin plot
+  p <- VlnPlot(
+    integrated_obj_copy,
+    features = genes,
+    group.by = "seurat_clusters",
+    pt.size = 0.1,
+    stack = TRUE,
+    flip = TRUE
+  ) +
+    ggtitle(paste("Cluster", clust, "- Top 5 Marker Genes (Across All Clusters)")) +
+    theme(
+      plot.title = element_text(size = 18, hjust = 0.5, face = "bold"),
+      axis.text.x = element_text(size = 12),
+      axis.text.y = element_text(size = 12),
+      axis.title.x = element_text(size = 14),
+      axis.title.y = element_text(size = 14),
+      legend.text = element_text(size = 12),
+      legend.title = element_text(size = 14)
+    )
+  
+  # Display plot
+  print(p)
+}
+```
+Visualization of clusters with manual annotation
+```{r}
+# Create named vector (cluster -> manual label)
+manual_labels <- c(
+  "0" = "T cell",
+  "1" = "Endocrine cell",
+  "2" = "NKT",
+  "3" = "NKT",
+  "4" = "Fibroblast",
+  "5" = "Ductal cell",
+  "6" = "Ductal cell",
+  "7" = "Endocrine cell",
+  "8" = "Myeloid cell",
+  "9" = "Plasma cell",
+  "10" = "MKI67+ ductal cell",
+  "11" = "Endothelial cell",
+  "12" = "Treg",
+  "13" = "NKT",
+  "14" = "Mast cell",
+  "15" = "Dendritic cell",
+  "16" = "B cell",
+  "17" = "Plasma cell",
+  "18" = "MKI67+ ductal cell",
+  "19" = "MKI67+ ductal cell"
+)
+
+# Map annotations
+annot_vector <- manual_labels[as.character(as.character(integrated_obj_copy$seurat_clusters))]
+names(annot_vector) <- colnames(integrated_obj_copy)
+# Add to metadata
+integrated_obj_copy <- AddMetaData(integrated_obj_copy, metadata = annot_vector, col.name = "Manual_Annotation")
+DimPlot(integrated_obj_copy, group.by = "Manual_Annotation", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP Annotated by Manual Cluster Labels")
+```
+Based on marker gene expression and literature review, I manually assigned biological identities to each cluster by integrating results from marker gene analysis and automatic annotation. For example, cluster 0 was annotated as T cells, characterized by high expression of canonical T cell markers such as IL7R and KLRB1 (Müller et al., 2018). Clusters 2 and 3 were labeled as NKT cells due to strong expression of CD40LG and cytotoxic markers (GZMK), aligning with innate-like lymphocyte profiles described in pancreatic tissues (Arase et al., 1992; Kronenberg, 2014). Cluster 4 exhibited elevated expression of extracellular matrix genes including COL1A2, COL3A1, and MMP11, consistent with fibroblast identity (LeBleu & Neilson, 2020). Cluster 5 and 6 showed high levels of SCEL and KRT86, markers associated with ductal epithelial cells (Basturk et al., 2005). Clusters 9 and 17 were annotated as plasma cells, supported by high expression of immunoglobulin genes like IGLC2, IGHA1, and IGLC3 (Nutt et al., 2015). Cluster 11 displayed endothelial marker TTR, suggesting endothelial cell identity (Kamei & Carman, 2010). Cluster 12 was labeled T regulatory cells (Tregs) based on prominent FOXP3 expression, a canonical Treg marker (Sakaguchi et al., 2008). The manual annotations largely corroborated the automatic annotations generated by SingleR, with minor refinements based on tissue context and published cell type-specific marker profiles.
+
+These manual labels allowed refinement of cluster identities by incorporating both known marker genes from prior studies and dataset-specific expression patterns, providing biologically meaningful classification for downstream analysis.
+
+Pseudotime Analysis:
+
+```{r}
+integrated_obj_copy$Condition <- ifelse(grepl("case1_", integrated_obj_copy$orig.ident), "NT",
+                                 ifelse(grepl("case2_", integrated_obj_copy$orig.ident), "PT",
+                                 ifelse(grepl("case3_|case4_", integrated_obj_copy$orig.ident), "HM", NA)))
+```
+Analysis 1: Pseudotime Analysis
+
+Pseudotime Analysis for all the cells
+```{r}
+# Load monocle3
+library(monocle3)
+library(SeuratWrappers)
+
+# Convert Seurat object to Monocle3 CellDataSet
+cds <- as.cell_data_set(integrated_obj_copy)
+
+# Transfer cluster labels from Seurat to Monocle
+cds@clusters$UMAP$clusters <- Idents(integrated_obj_copy)
+cds@colData$Condition <- integrated_obj_copy$Condition[colnames(cds)]
+
+# Learn trajectory graph
+cds <- cluster_cells(cds)
+cds <- learn_graph(cds)
+
+# Order cells
+cds <- order_cells(cds, root_pr_nodes = "Y_1")
+
+
+```
+```{r}
+# Plot pseudotime (equivalent to p1)
+p1 <- plot_cells(cds,
+                 color_cells_by = "pseudotime",
+                 show_trajectory_graph = TRUE,
+                 label_groups_by_cluster = FALSE,
+                 label_leaves = FALSE,
+                 label_branch_points = FALSE) +
+  ggtitle("Pseudotime")
+
+# Plot by cluster (equivalent to p2)
+p2 <- plot_cells(cds,
+                 color_cells_by = "cluster",
+                 show_trajectory_graph = TRUE,
+                 label_groups_by_cluster = TRUE) +
+  ggtitle("cluster")
+
+# Plot by sample group (equivalent to p3)
+p3 <- plot_cells(cds,
+                 color_cells_by = "Condition",
+                 show_trajectory_graph = TRUE,
+                 label_groups_by_cluster = FALSE) +
+  ggtitle("sample group")
+
+# Arrange into panel 
+library(patchwork)
+combined_plot <- (p1 | p2 | p3)
+
+print(combined_plot)
+```
+
+Pseudotime subsetted for Ductal cells (Fig 3E)
+```{r}
+library(monocle3)
+library(SeuratWrappers)
+library(patchwork)
+
+# Subset for ductal cells
+ductal_obj <- subset(integrated_obj_copy, subset = Manual_Annotation == "Ductal cell")
+
+# Convert to Monocle3 
+cds <- as.cell_data_set(ductal_obj, assay = "integrated", layer = "data")
+
+# Transfer cluster info
+cds@clusters$UMAP$clusters <- Idents(ductal_obj)
+
+# Transfer metadata
+colData(cds)$Condition <- ductal_obj$Condition
+colData(cds)$Manual_Annotation <- ductal_obj$Manual_Annotation
+
+# Cluster cells in Monocle
+cds <- cluster_cells(cds)
+
+# Learn global trajectory graph (IMPORTANT → avoid partitions splitting)
+cds <- learn_graph(cds, use_partition = FALSE)
+
+# Order cells (after selecting a root interactively)
+plot_cells(cds, color_cells_by = "Condition")  # to select root
+cds <- order_cells(cds, root_pr_nodes = "Y_1")
+
+# Create plots
+
+# Plot pseudotime
+p1 <- plot_cells(cds,
+                 color_cells_by = "pseudotime",
+                 show_trajectory_graph = TRUE,
+                 label_groups_by_cluster = FALSE,
+                 label_leaves = TRUE,
+                 label_branch_points = TRUE,
+                 label_roots = TRUE,
+                 cell_size = 0.8) +
+  scale_color_viridis_c(option = "plasma", direction = -1) +
+  ggtitle("Pseudotime")
+
+# Plot by cluster
+p2 <- plot_cells(cds,
+                 color_cells_by = "cluster",
+                 show_trajectory_graph = TRUE,
+                 label_groups_by_cluster = TRUE,
+                 label_leaves = TRUE,
+                 label_branch_points = TRUE,
+                 label_roots = TRUE,
+                 cell_size = 0.8) +
+  ggtitle("Cluster")
+
+# Plot by sample group
+p3 <- plot_cells(cds,
+                 color_cells_by = "Condition",
+                 show_trajectory_graph = TRUE,
+                 label_groups_by_cluster = FALSE,
+                 label_leaves = TRUE,
+                 label_branch_points = TRUE,
+                 label_roots = TRUE,
+                 cell_size = 0.8) +
+  ggtitle("Sample Group")
+
+# Combine into panel
+combined_plot <- (p1 | p2 | p3)
+
+# Display
+print(combined_plot)
+
+```
+Fig 3 C from the paper:
+I performed pseudotime analysis using Monocle3, initially across the entire cellular population before narrowing the analysis to the ductal cell subset. In the full dataset analysis, pseudotime trajectories captured broader differentiation paths across diverse cell types but displayed complex and intertwined branches, making it difficult to interpret ductal-specific progression. To focus specifically on ductal lineage dynamics, I subsetted the integrated dataset to include only ductal cells and reconstructed pseudotime trajectories within this compartment. The trajectory for ductal cells revealed two major disconnected manifolds: one corresponding predominantly to normal tissue (NT) cells and another enriched for primary tumor (PT) and metastasis (HM) cells. The pseudotime ordering spans from low values in the NT-dominated manifold to higher values in the tumor-enriched manifold, connected by an artificial long trajectory bridge between them. This pattern suggests transcriptional divergence between normal and malignant ductal cells, leading to structural separation in UMAP space. In contrast to the continuous tree-like trajectory observed in the paper, the trajectory reflected a more fragmented topology, potentially due to residual batch effects or inherent biological heterogeneity between normal and tumor ductal compartments. Similar molecular divergence between normal and malignant ductal cells has been reported in pancreatic cancer studies (Chan-Seng-Yue et al., 2020). Despite structural differences, pseudotime ordering recapitulated progressive transcriptional changes from normal-like to malignant ductal phenotypes, consistent with tumor progression.
+
+Analysis 2: Cell type proportion analysis (Figure 1E)
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Get metadata for ALL cells
+meta <- integrated_obj_copy@meta.data
+
+# Tabulate counts per cell type and condition
+counts <- meta %>%
+  group_by(Condition, Manual_Annotation) %>%
+  summarize(n_cells = n()) %>%
+  group_by(Condition) %>%
+  mutate(percentage = n_cells / sum(n_cells) * 100)
+
+# Stacked barplot
+p2 <- ggplot(counts, aes(x = Condition, y = percentage, fill = Manual_Annotation)) +
+  geom_bar(stat = "identity", color = "black") +
+  theme_minimal() +
+  ylab("Percent of cells per condition") +
+  ggtitle("Cell type proportions across conditions") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Display plot
+print(p2)
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+counts <- integrated_obj_copy@meta.data %>%
+  group_by(Condition, Manual_Annotation) %>%
+  summarize(n_cells = n()) %>%
+  group_by(Condition) %>%
+  mutate(percentage = n_cells / sum(n_cells) * 100)
+
+ggplot(counts, aes(x = percentage, y = Manual_Annotation, fill = Condition)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  xlab("% cells per type") +
+  ggtitle("Cell type proportions across conditions")
+
+```
+Extra Analysis: Cell–Cell Communication Analysis (CellChat)
+
+```{r}
+library(CellChat)
+library(patchwork)
+library(Seurat)
+library(SeuratObject)
+
+```
+
+```{r}
+library(Matrix)
+
+# Extract expression matrix
+expr_matrix <- GetAssayData(integrated_obj_copy, slot = "data")
+
+# Subset matrix to keep only positive values (replace negatives with small number)
+expr_matrix@x[expr_matrix@x < 0] <- 0  # if sparse matrix
+# Alternatively: expr_matrix[expr_matrix < 0] <- 0 if dense
+
+# Remove rows (genes) with all zeros
+nonzero_genes <- rowSums(expr_matrix) > 0
+expr_matrix <- expr_matrix[nonzero_genes, ]
+
+# Remove columns (cells) with all zeros
+nonzero_cells <- colSums(expr_matrix) > 0
+expr_matrix <- expr_matrix[, nonzero_cells]
+
+# Check dimension again
+cat("Filtered matrix dimensions:", dim(expr_matrix), "\n")
+
+# Also filter metadata to match cells
+meta_data <- integrated_obj_copy@meta.data
+meta_data <- meta_data[colnames(expr_matrix), , drop = FALSE]
+meta_data$labels <- meta_data$Manual_Annotation
+
+cellchat <- createCellChat(object = expr_matrix, meta = meta_data, group.by = "labels")
+
+# Load database
+cellchat@DB <- CellChatDB.human
+
+# Subset signaling genes
+cellchat <- subsetData(cellchat)
+
+# Identify overexpressed genes/interactions
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+# Compute communication probabilities
+cellchat <- computeCommunProb(cellchat)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+cellchat <- computeCommunProbPathway(cellchat)
+
+# Aggregate network
+cellchat <- aggregateNet(cellchat)
+
+```
+
+
+```{r}
+# Show overall interaction network
+netVisual_circle(cellchat@net$count, vertex.weight = as.numeric(table(cellchat@idents)), weight.scale = TRUE, label.edge = FALSE)
+
+```
+```{r}
+# Heatmap of number of interactions
+netVisual_heatmap(cellchat)
+
+```
+I used CellChat (Jin et al., 2021) to infer global cell–cell communication networks across the annotated cell populations. This analysis revealed that ductal cells, myeloid cells, fibroblasts, and NKT cells formed dense interaction hubs, showing the highest number of predicted ligand–receptor interactions with other cell types. In contrast, endocrine and endothelial cells displayed fewer interactions, suggesting lower participation in signaling within the tumor microenvironment. Notably, communication between ductal and myeloid cells was highly enriched, consistent with reported roles of tumor-associated macrophages in promoting pancreatic cancer progression. The heatmap further highlighted robust bidirectional signaling between ductal cells and fibroblasts, implicating potential tumor–stroma crosstalk. This network-level analysis complements the cell type and pseudotime analyses by identifying key interacting populations and suggests that therapeutic targeting of stromal or immune-mediated interactions may disrupt pro-tumorigenic signaling circuits in pancreatic cancer.
+
+
+Condition-Specific Cell–Cell Communication Analysis Using CellChat
+```{r}
+integrated_obj_copy$Condition <- ifelse(grepl("case1_", integrated_obj_copy$orig.ident), "NT",
+                                 ifelse(grepl("case2_", integrated_obj_copy$orig.ident), "PT",
+                                 ifelse(grepl("case3_|case4_", integrated_obj_copy$orig.ident), "HM", NA)))
+
+```
+
+
+```{r}
+seurat_list <- SplitObject(integrated_obj_copy, split.by = "Condition")
+cellchat_list <- list()
+
+for (cond in names(seurat_list)) {
+  cat("Processing condition:", cond, "\n")
+  
+  # Extract expression matrix
+  expr_matrix <- GetAssayData(seurat_list[[cond]], slot = "data")
+  expr_matrix@x[expr_matrix@x < 0] <- 0
+  nonzero_genes <- rowSums(expr_matrix) > 0
+  expr_matrix <- expr_matrix[nonzero_genes, ]
+  nonzero_cells <- colSums(expr_matrix) > 0
+  expr_matrix <- expr_matrix[, nonzero_cells]
+  
+  # Metadata
+  meta_data <- seurat_list[[cond]]@meta.data
+  meta_data <- meta_data[colnames(expr_matrix), , drop = FALSE]
+  meta_data$labels <- meta_data$Manual_Annotation
+  
+  # Create CellChat object
+  cellchat <- createCellChat(object = expr_matrix, meta = meta_data, group.by = "labels")
+  cellchat@DB <- CellChatDB.human
+  
+  # Subset signaling genes
+  cellchat <- subsetData(cellchat)
+  
+  # Overexpressed genes/interactions
+  cellchat <- identifyOverExpressedGenes(cellchat)
+  cellchat <- identifyOverExpressedInteractions(cellchat)
+  
+  # Compute communication
+  cellchat <- computeCommunProb(cellchat)
+  cellchat <- filterCommunication(cellchat, min.cells = 10)
+  cellchat <- computeCommunProbPathway(cellchat)
+  cellchat <- aggregateNet(cellchat)
+  
+  # Store in list
+  cellchat_list[[cond]] <- cellchat
+}
+
+```
+
+```{r}
+# Plot heatmaps for each condition with custom titles
+netVisual_heatmap(cellchat_list[["NT"]], measure = "count", title.name = "NT")
+netVisual_heatmap(cellchat_list[["PT"]], measure = "count", title.name = "PT")
+netVisual_heatmap(cellchat_list[["HM"]], measure = "count", title.name = "HM")
+
+```
+In addition to the global cell–cell communication network, I stratified the analysis by condition to compare interaction patterns between normal tissue (NT), primary tumor (PT), and metastasis (HM). The heatmaps show the number of predicted ligand–receptor interactions from sender (rows) to receiver (columns) across each condition. Notably, fibroblasts, myeloid cells, and ductal cells exhibited higher interaction counts in primary tumor and metastasis relative to normal tissue, suggesting increased stromal and immune crosstalk in tumor and metastatic microenvironments. In contrast, endocrine and endothelial cells showed fewer interactions in tumor and metastasis, reflecting possible loss of normal tissue signaling. These patterns align with known roles of fibroblasts and tumor-associated macrophages in promoting pancreatic cancer progression through paracrine signaling. This condition-specific analysis highlights shifts in communication networks during tumor progression and metastasis, identifying fibroblast–ductal and myeloid–ductal interactions as potential contributors to tumor–stroma crosstalk.
+
+Citation: Hosein, A. N., Huang, H., Wang, Z., Parmar, K., Du, W., Huang, J., Maitra, A., Olson, E., Verma, U., & Brekken, R. A. (2019). Cellular heterogeneity during mouse pancreatic ductal adenocarcinoma progression at single-cell resolution. JCI Insight, 4(16). https://doi.org/10.1172/jci.insight.129212
+
+```{r}
+sessionInfo()
+```
+
