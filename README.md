@@ -59,11 +59,3 @@ Data used is from a published study:
 ## Reproducibility
 
 All code is contained in the RMarkdown file. Software versions used are printed at the end via `sessionInfo()`.
-
-### R version
-Tested with:
-- R 4.3.x
-- Seurat ≥ 4.3
-- Monocle3 ≥ 1.3.1
-- CellChat ≥ 1.6.0
-
